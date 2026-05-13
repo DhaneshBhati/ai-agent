@@ -1,0 +1,6 @@
+{
+  "name": "PitchPulse",
+  "description": "High-concurrency, real-time engagement engine for live sporting events.",
+  "requestFramePermissions": ["vibrate"],
+  "majorCapabilities": []
+}
