@@ -10,8 +10,9 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-// Single socket instance connects to the same origin URL
-const socket = io();
+// Single socket instance connects to the same origin URL with websocket transport
+// This allows load balancing across Node.js Cluster without sticky sessions
+const socket = io({ transports: ["websocket"] });
 
 type Outcome = "DOT" | "SINGLE" | "BOUNDARY" | "WICKET";
 
@@ -20,7 +21,9 @@ export default function PredictionEngine() {
   const [countdown, setCountdown] = useState(0);
   const [prediction, setPrediction] = useState<Outcome | null>(null);
   const [result, setResult] = useState<any>(null);
-  const [squads, setSquads] = useState({ RCB: 0, CSK: 0 });
+  const [squads, setSquads] = useState({ RCB: 0, KKR: 0 });
+  const [liveScore, setLiveScore] = useState({ team: "RCB", runs: 45, wickets: 0 });
+  const [pulsePoints, setPulsePoints] = useState(14250);
   
   // Fake user squad for prototype
   const userSquad = "RCB"; 
@@ -28,7 +31,8 @@ export default function PredictionEngine() {
   useEffect(() => {
     socket.on("match_state", (state) => {
       setMatchState(state);
-      setSquads(state.squads);
+      if (state.squads) setSquads(state.squads);
+      if (state.liveScore) setLiveScore(state.liveScore);
       setCountdown(state.countdown);
     });
 
@@ -51,11 +55,14 @@ export default function PredictionEngine() {
 
     socket.on("ball_result", (data) => {
       setMatchState((prev: any) => ({ ...prev, isPredicting: false }));
+      if (data.liveScore) setLiveScore(data.liveScore);
       setResult(data.actual);
-      if (data.actual === "BOUNDARY" || data.actual === "WICKET") {
-        if (typeof navigator !== "undefined" && navigator.vibrate) {
-          navigator.vibrate([200, 100, 200, 100, 400]); // Excitement pattern
-        }
+    });
+
+    socket.on("match_event_pubsub", (data) => {
+      // Powerful stadium-sync vibration when admin hits BOUNDARY or WICKET
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate([200, 100, 200, 100, 400]); // Excitement pattern
       }
     });
 
@@ -65,13 +72,20 @@ export default function PredictionEngine() {
       socket.off("countdown_tick");
       socket.off("squad_points_update");
       socket.off("ball_result");
+      socket.off("match_event_pubsub");
     };
   }, []);
 
   const handlePredict = (outcome: Outcome) => {
     if (!matchState?.isPredicting || prediction) return;
     
+    // 2. Optimistic UI Update (Zero-Latency Illusion)
+    // Instantly set prediction state and deduct points to make UI feel native
     setPrediction(outcome);
+    setPulsePoints(prev => prev - 100);
+    
+    // Send background network request
+    // Since backend uses Redis Buffer, this is ultra-fast
     socket.emit("user_prediction", { squad: userSquad, outcome, amount: 100 });
   };
 
@@ -82,9 +96,35 @@ export default function PredictionEngine() {
   };
 
   return (
-    <div className="flex-1 grid grid-cols-12 gap-6 min-h-0 w-full max-w-7xl mx-auto">
-      
-      {/* Left: Squad Battle / Social */}
+    <div className="flex-1 flex flex-col gap-6">
+      {/* Header Section */}
+      <header className="flex flex-wrap items-center justify-between bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 gap-4">
+        <div className="flex items-center gap-4">
+          <div className="w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center shadow-[0_0_20px_rgba(16,185,129,0.4)]">
+            <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+          </div>
+          <h1 className="text-2xl font-bold tracking-tight text-white italic">PITCH<span className="text-emerald-400">PULSE</span></h1>
+        </div>
+        
+        <div className="flex items-center gap-4 md:gap-8">
+          <div className="text-center md:text-right">
+            <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Match Live ({liveScore.team} Batting)</p>
+            <p className="text-lg font-mono font-bold">{liveScore.team} <span className="text-emerald-400">{liveScore.runs}/{liveScore.wickets}</span> <span className="text-slate-400 text-sm font-normal">({matchState?.ballNumber || "0.0"})</span></p>
+          </div>
+          <div className="h-10 w-px bg-white/10 hidden md:block"></div>
+          <div className="flex flex-col items-end">
+            <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Pulse Points</p>
+            <div className="flex items-center gap-2">
+              <span className="text-xl font-bold text-yellow-400 font-mono">{pulsePoints.toLocaleString()}</span>
+              <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <div className="flex-1 grid grid-cols-12 gap-6 min-h-0 w-full max-w-7xl mx-auto">
+        
+        {/* Left: Squad Battle / Social */}
       <div className="col-span-12 lg:col-span-3 flex flex-col gap-4">
         <div className="flex-1 bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl p-5 flex flex-col">
           <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6 flex items-center justify-between">
@@ -96,13 +136,13 @@ export default function PredictionEngine() {
             <div className="space-y-3">
               <div className="flex justify-between items-end mb-1">
                 <span className="text-sm font-bold text-red-500">RCB Ultras</span>
-                <span className="text-lg font-mono font-bold text-slate-300">{Math.round(calculateBarWidth(squads.RCB, squads.CSK))}%</span>
+                <span className="text-lg font-mono font-bold text-slate-300">{Math.round(calculateBarWidth(squads.RCB, squads.KKR))}%</span>
               </div>
               <div className="h-4 w-full bg-slate-800 rounded-full overflow-hidden border border-white/5 relative">
                 <motion.div 
                   className="absolute top-0 bottom-0 left-0 bg-red-500 shadow-[0_0_15px_rgba(239,68,68,0.5)]" 
                   initial={{ width: '50%' }}
-                  animate={{ width: `${calculateBarWidth(squads.RCB, squads.CSK)}%` }} 
+                  animate={{ width: `${calculateBarWidth(squads.RCB, squads.KKR)}%` }} 
                   transition={{ duration: 0.5 }}
                 />
               </div>
@@ -115,18 +155,18 @@ export default function PredictionEngine() {
 
             <div className="space-y-3">
               <div className="flex justify-between items-end mb-1">
-                <span className="text-sm font-bold text-yellow-500">CSK Fanatics</span>
-                <span className="text-lg font-mono font-bold text-slate-300">{Math.round(calculateBarWidth(squads.CSK, squads.RCB))}%</span>
+                <span className="text-sm font-bold text-purple-500">KKR Knights</span>
+                <span className="text-lg font-mono font-bold text-slate-300">{Math.round(calculateBarWidth(squads.KKR, squads.RCB))}%</span>
               </div>
               <div className="h-4 w-full bg-slate-800 rounded-full overflow-hidden border border-white/5 relative">
                 <motion.div 
-                  className="absolute top-0 bottom-0 left-0 bg-yellow-500 shadow-[0_0_15px_rgba(234,179,8,0.5)]" 
+                  className="absolute top-0 bottom-0 left-0 bg-purple-500 shadow-[0_0_15px_rgba(168,85,247,0.5)]" 
                   initial={{ width: '50%' }}
-                  animate={{ width: `${calculateBarWidth(squads.CSK, squads.RCB)}%` }} 
+                  animate={{ width: `${calculateBarWidth(squads.KKR, squads.RCB)}%` }} 
                   transition={{ duration: 0.5 }}
                 />
               </div>
-              <p className="text-xs font-mono text-slate-500 text-right">{squads.CSK.toLocaleString()} PTS</p>
+              <p className="text-xs font-mono text-slate-500 text-right">{squads.KKR.toLocaleString()} PTS</p>
             </div>
           </div>
 
@@ -138,8 +178,8 @@ export default function PredictionEngine() {
                 <p><span className="font-bold">@ViratFan</span> wagered 500 on <span className="text-emerald-400">WICKET</span></p>
               </div>
               <div className="flex items-center gap-3 text-xs opacity-60">
-                <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-[10px] font-bold">D</div>
-                <p><span className="font-bold">@DevOpsKing</span> joined CSK Fanatics</p>
+                <div className="w-6 h-6 rounded-full bg-purple-500 flex items-center justify-center text-[10px] font-bold">K</div>
+                <p><span className="font-bold">@DevOpsKing</span> joined KKR Knights</p>
               </div>
             </div>
           </div>
@@ -259,6 +299,7 @@ export default function PredictionEngine() {
                       {prediction === result ? (
                         <motion.div 
                           initial={{ scale: 0 }} animate={{ scale: 1 }}
+                          onAnimationComplete={() => setPulsePoints(prev => prev + 350)} // 100 initial + 250 won
                           className="inline-flex items-center space-x-2 text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-6 py-3 rounded-full font-bold shadow-[0_0_20px_rgba(16,185,129,0.2)]"
                         >
                           <Trophy className="w-5 h-5" />
@@ -335,6 +376,25 @@ export default function PredictionEngine() {
           </div>
         </div>
       </div>
+      </div>
+
+      {/* Bottom Bar / Ticker */}
+      <footer className="mt-auto h-12 bg-white/5 backdrop-blur-md rounded-xl flex items-center px-4 md:px-6 border border-white/10 shrink-0">
+        <div className="flex items-center gap-2 md:gap-4 text-[9px] md:text-[11px] font-bold uppercase tracking-widest text-emerald-400 flex-shrink-0">
+          <span className="flex items-center gap-2">
+            <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>
+            Connected
+          </span>
+          <div className="w-px h-4 bg-white/10 hidden md:block"></div>
+          <span className="text-slate-400 hidden md:block">Latency: 42ms</span>
+        </div>
+        <div className="ml-auto flex items-center gap-6 overflow-hidden md:pl-8">
+           <div className="flex gap-8 animate-pulse opacity-70 whitespace-nowrap">
+             <span className="text-[9px] md:text-[11px] text-slate-500 italic tracking-tighter">PREVIOUS BALL: <span className="text-white font-bold">{result || "WAITING"}</span></span>
+             <span className="text-[9px] md:text-[11px] text-slate-500 italic tracking-tighter hidden md:inline">PROBABILITY: <span className="text-white font-bold">BOUNDARY 12.3%</span></span>
+           </div>
+        </div>
+      </footer>
 
     </div>
   );
